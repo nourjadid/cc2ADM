@@ -1,0 +1,287 @@
+---
+title: "R Notebook"
+output: github_document
+#tutoriel de reference https://benjjneb.github.io/dada2/tutorial.html
+---
+
+
+---
+
+#tutoriel de reference https://benjjneb.github.io/dada2/tutorial.html
+```{r}
+# Installation et chargement des bibliothèques nécessaires
+install.packages("Rcpp")
+library(Rcpp)
+
+```
+
+```{r}
+# Chargement de la bibliothèque dada2
+library(dada2)
+
+```
+
+```{r}
+# Définition du chemin des données et exploration des fichiers
+path <- "/home/rstudio/tutodada2 final/MiSeq_SOP"
+list.files(path)
+
+```
+
+```{r}
+# Chargement des fichiers FASTQ et extraction des noms des échantillons
+# Les fichiers de lecture avant (R1) et arrière (R2) sont identifiés selon leur suffixe. Les noms des échantillons sont dérivés des noms de fichiers.
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+# Visualisation des profils de qualité des lectures
+# Ces graphiques permettent de juger la qualité des lectures avant et arrière pour ajuster les paramètres de filtrage.
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+
+```
+
+```{r}
+# Définition des chemins pour les fichiers filtrés
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+```{r}
+# Filtrage et rognage des séquences
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,160),
+                     maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+                     compress=TRUE, multithread=TRUE) 
+head(out)
+
+```
+
+```{r}
+# Apprentissage des taux d'erreur des séquences
+# Les taux d'erreur sont estimés pour les séquences filtrées, ce qui permettra une correction lors des étapes d'inférence.
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+# Visualisation des taux d'erreur
+# Ces graphiques comparent les taux d'erreur observés avec ceux attendus.
+plotErrors(errF, nominalQ=TRUE)
+
+```
+
+```{r}
+# Inférence des séquences de haute qualité
+# Les algorithmes de DADA2 sont appliqués aux séquences avant et arrière pour identifier des variants uniques (ASV).
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+
+```
+```
+```
+```{r}
+# Affichage des résultats d'inférence pour la première lecture avant
+dadaFs[[1]]
+
+```
+
+```{r}
+# Fusion des lectures appariées
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspection des données fusionnées pour le premier échantillon
+head(mergers[[1]])
+
+```
+```
+```
+```{r}
+# Construction de la table des ASV (Amplicon Sequence Variants)
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+```
+```
+```
+```{r}
+# Inspection de la distribution des longueurs des séquences
+table(nchar(getSequences(seqtab)))
+
+```
+
+```
+```
+```{r}
+# Suppression des chimères
+# Les chimères, des artefacts de séquençage, sont éliminées pour obtenir des séquences fiables.
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+
+# Calcul du pourcentage de séquences non-chimériques
+# Cette étape évalue la proportion de séquences valides restant après suppression des chimères.
+sum(seqtab.nochim) / sum(seqtab)
+
+
+```
+
+```{r}
+# Suivi des lectures à travers les étapes
+# Un tableau est créé pour suivre le nombre de lectures après chaque étape du pipeline.
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+
+
+```
+
+
+```{r}
+# Attribution taxonomique
+# Les séquences sont comparées à une base de données (par exemple SILVA) pour attribuer des taxons (espèces, genres, etc.).
+taxa <- assignTaxonomy(seqtab.nochim, "/home/rstudio/tutodada2 final/silva_nr_v132_train_set.fa.gz", multithread=TRUE)
+# Examen des résultats d'attribution
+taxa.print <- taxa
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+
+```
+
+
+```{r}
+# Évaluation de la précision sur les échantillons de contrôle (Mock)
+# On identifie les ASVs présents dans l'échantillon Mock et les trie par abondance décroissante.
+unqs.mock <- seqtab.nochim["Mock",]
+unqs.mock <- sort(unqs.mock[unqs.mock > 0], decreasing=TRUE)
+cat("DADA2 inferred", length(unqs.mock), "sample sequences present in the Mock community.\n")
+
+
+```
+
+
+```{r}
+# Vérification des correspondances avec les séquences de référence
+# On compare les ASVs du Mock aux séquences attendues pour évaluer la qualité de l'inférence.
+mock.ref <- getSequences(file.path(path, "HMP_MOCK.v35.fasta"))
+match.ref <- sum(sapply(names(unqs.mock), function(x) any(grepl(x, mock.ref))))
+cat("Of those,", sum(match.ref), "were exact matches to the expected reference sequences.\n")
+
+
+```
+
+
+```{r}
+# Chargement des bibliothèques pour la visualisation et la manipulation des données phylogénétiques
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+
+```
+
+
+```{r}
+# Définition du thème graphique pour les visualisations
+theme_set(theme_bw())
+```
+
+```{r}
+# Création d'un tableau de métadonnées basé sur les noms d'échantillons
+# On extrait des informations comme le sujet, le genre, et le jour à partir des noms d'échantillons.
+samples.out <- rownames(seqtab.nochim)
+subject <- sapply(strsplit(samples.out, "D"), `[`, 1)
+gender <- substr(subject, 1, 1)
+subject <- substr(subject, 2, 999)
+day <- as.integer(sapply(strsplit(samples.out, "D"), `[`, 2))
+samdf <- data.frame(Subject=subject, Gender=gender, Day=day)
+samdf$When <- "Early"
+samdf$When[samdf$Day > 100] <- "Late"
+rownames(samdf) <- samples.out
+
+```
+
+
+```{r}
+# Création de l'objet Phyloseq
+# Cet objet combine les tables ASV, les métadonnées, et les taxonomies pour l'analyse.
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+# Exclusion de l'échantillon Mock de l'analyse
+ps <- prune_samples(sample_names(ps) != "Mock", ps)
+
+```
+
+
+```{r}
+# Ajout des séquences d'ADN aux données Phyloseq
+# Les séquences sont renommées en tant qu'ASVs pour simplifier leur identification.
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+
+```
+
+```{r}
+# Visualisation de la richesse alpha des échantillons
+# On trace les indices de diversité Shannon et Simpson en fonction des jours, colorés par la période.
+plot_richness(ps, x="Day", measures=c("Shannon", "Simpson"), color="When")
+
+```
+
+
+```{r}
+# Transformation des données pour calculer les distances de Bray-Curtis
+# Les valeurs des ASVs sont converties en proportions pour normaliser les données.
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+# Ordination des données avec l'analyse NMDS basée sur les distances de Bray-Curtis
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+```
+
+
+```{r}
+# Visualisation de l'ordination NMDS
+# Les échantillons sont placés dans un espace réduit selon leurs similarités en Bray-Curtis.
+plot_ordination(ps.prop, ord.nmds.bray, color="When", title="Bray NMDS")
+
+```
+
+
+```{r}
+# Identification et visualisation des 20 taxons les plus abondants
+# Les données sont transformées en proportions et seules les 20 familles les plus représentées sont affichées.
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU / sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20, x="Day", fill="Family") + facet_wrap(~When, scales="free_x")
+
+```
+
+---
+
+`
+```
+
+```
+
+```
+
+```
+
+
+
+
+
+
+
+
+
+
+
+```
+
